@@ -1,12 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { AnimatePresence, motion, useMotionValue, useTransform } from 'framer-motion'
+import { AnimatePresence, animate, motion, useMotionValue, useTransform } from 'framer-motion'
 import confetti from 'canvas-confetti'
 
-const ITEM_HEIGHT = 64
-const VISIBLE_ROWS = 7
-const VIEWPORT_HEIGHT = ITEM_HEIGHT * VISIBLE_ROWS
-const CENTER_OFFSET = ((VISIBLE_ROWS - 1) / 2) * ITEM_HEIGHT
-const SPIN_DURATION = 2.25
+const MAX_WHEEL_SLICES = 16
+const MIN_WHEEL_SLICES = 8
+const SLICE_COLORS = ['#9a3412', '#0f766e', '#b45309', '#115e59', '#c2410c', '#0e7490', '#d97706', '#134e4a']
 
 function shuffleArray(items) {
   const arr = [...items]
@@ -18,55 +16,71 @@ function shuffleArray(items) {
 }
 
 /**
- * Build a wheel list that stops ON the winner, with more names after it
- * so the picker still shows rows below center (doesn't feel like list end).
+ * Slices for a fortune wheel. The wheel always stops on winnerIndex.
+ * Long lists are sampled down to MAX_WHEEL_SLICES so each name stays readable.
+ * The predetermined winner is always one of the slices.
  */
-export function buildSpinSequence(eligibleNames, winnerName) {
-  const pool = eligibleNames?.length ? eligibleNames : [winnerName]
-  const shuffled = shuffleArray(pool)
-  const loops = 1.5 + Math.random() * 0.5
-  const fullLoops = Math.floor(loops)
-  const before = []
+function buildWheelSlices(eligibleNames, winnerName) {
+  const winner = String(winnerName || 'برنده')
+  const names = (eligibleNames || []).map((name) => String(name || '').trim()).filter(Boolean)
+  let slices = names.length ? [...names] : [winner]
 
-  for (let i = 0; i < fullLoops; i++) {
-    before.push(...shuffled)
+  if (!slices.includes(winner)) slices = [winner, ...slices]
+
+  if (slices.length > MAX_WHEEL_SLICES) {
+    const others = shuffleArray(slices.filter((name) => name !== winner))
+    slices = shuffleArray([winner, ...others.slice(0, MAX_WHEEL_SLICES - 1)])
   }
 
-  const fraction = loops - fullLoops
-  if (fraction > 0.05) {
-    before.push(...shuffled.slice(0, Math.max(1, Math.round(shuffled.length * fraction))))
-  }
-
-  while (before.length < 18) {
-    before.push(...shuffleArray(pool))
-  }
-
-  // Names after the winner fill the lower half of the picker (≈3–5 visible rows)
-  const afterCount = Math.max(4, Math.ceil(VISIBLE_ROWS / 2) + 1)
-  const after = []
-  while (after.length < afterCount) {
-    const batch = shuffleArray(pool.filter((n) => n !== winnerName))
-    if (!batch.length) {
-      after.push(...shuffleArray(pool))
+  if (slices.length < MIN_WHEEL_SLICES) {
+    const fillers = slices.filter((name) => name !== winner)
+    if (!fillers.length) {
+      slices = Array.from({ length: MIN_WHEEL_SLICES }, () => winner)
     } else {
-      after.push(...batch)
+      let index = 0
+      while (slices.length < MIN_WHEEL_SLICES) {
+        slices.push(fillers[index % fillers.length])
+        index += 1
+      }
     }
   }
 
-  const sequence = [...before, winnerName, ...after.slice(0, afterCount)]
-  const stopIndex = before.length
-  return { sequence, stopIndex }
+  const winnerIndex = Math.max(0, slices.indexOf(winner))
+  return { slices, winnerIndex }
 }
 
-/** Fast blur-through for ~80–85% of time, short visible decelerate at the end. */
-function spinEase(t) {
-  const split = 0.82
-  if (t <= split) {
-    return (0.94 * t) / split
-  }
-  const u = (t - split) / (1 - split)
-  // ease-out on the final 6% of distance
-  return 0.94 + 0.06 * (1 - (1 - u) ** 2.4)
+/** Fast spin, then a long ease-out so the pointer settles on the winner. */
+function wheelEase(t) {
+  return 1 - (1 - t) ** 3.2
+}
+
+function polar(angleDeg, radius) {
+  const rad = ((angleDeg - 90) * Math.PI) / 180
+  return [50 + radius * Math.cos(rad), 50 + radius * Math.sin(rad)]
+}
+
+function slicePath(index, count, radius) {
+  const sweep = 360 / count
+  const start = index * sweep
+  const end = start + sweep
+  const large = sweep > 180 ? 1 : 0
+  const [x1, y1] = polar(start, radius)
+  const [x2, y2] = polar(end, radius)
+  return `M 50 50 L ${x1} ${y1} A ${radius} ${radius} 0 ${large} 1 ${x2} ${y2} Z`
+}
+
+function shortenName(name, count) {
+  const max = count <= 8 ? 16 : count <= 12 ? 13 : 10
+  const value = String(name || '')
+  if (value.length <= max) return value
+  return `${value.slice(0, max - 1)}…`
+}
+
+function nameAtRotation(deg, slices) {
+  const sweep = 360 / slices.length
+  const normalized = (((-deg) % 360) + 360) % 360
+  const index = Math.min(slices.length - 1, Math.floor(normalized / sweep + 1e-6))
+  return slices[index] || ''
 }
 
 function fireWinnerConfetti() {
@@ -127,112 +141,143 @@ function AmbientBackground() {
   )
 }
 
-function WheelRow({ index, name, y }) {
-  const opacity = useTransform(y, (latest) => {
-    const itemCenter = index * ITEM_HEIGHT + latest + ITEM_HEIGHT / 2
-    const viewportCenter = VIEWPORT_HEIGHT / 2
-    const dist = Math.abs(itemCenter - viewportCenter) / ITEM_HEIGHT
-    if (dist < 0.45) return 1
-    if (dist < 1.35) return 0.55
-    if (dist < 2.35) return 0.25
-    return 0.08
-  })
-
-  const filter = useTransform(y, (latest) => {
-    const itemCenter = index * ITEM_HEIGHT + latest + ITEM_HEIGHT / 2
-    const viewportCenter = VIEWPORT_HEIGHT / 2
-    const dist = Math.abs(itemCenter - viewportCenter) / ITEM_HEIGHT
-    if (dist < 0.45) return 'blur(0px)'
-    if (dist < 1.35) return 'blur(1.5px)'
-    if (dist < 2.35) return 'blur(3.5px)'
-    return 'blur(6px)'
-  })
-
-  const scale = useTransform(y, (latest) => {
-    const itemCenter = index * ITEM_HEIGHT + latest + ITEM_HEIGHT / 2
-    const viewportCenter = VIEWPORT_HEIGHT / 2
-    const dist = Math.abs(itemCenter - viewportCenter) / ITEM_HEIGHT
-    if (dist < 0.45) return 1.08
-    if (dist < 1.35) return 0.94
-    if (dist < 2.35) return 0.86
-    return 0.8
-  })
-
-  return (
-    <motion.div
-      className="flex items-center justify-center px-4 text-center font-semibold will-change-transform"
-      style={{
-        height: ITEM_HEIGHT,
-        opacity,
-        filter,
-        scale,
-      }}
-    >
-      <span className="max-w-full truncate text-2xl text-white sm:text-3xl">{name}</span>
-    </motion.div>
+function FortuneWheel({ names, winnerName, onComplete }) {
+  const { slices, winnerIndex } = useMemo(
+    () => buildWheelSlices(names, winnerName),
+    [names, winnerName],
   )
-}
 
-function PickerWheel({ sequence, stopIndex, onComplete }) {
-  const y = useMotionValue(CENTER_OFFSET)
-  const startY = CENTER_OFFSET
-  const endY = CENTER_OFFSET - stopIndex * ITEM_HEIGHT
+  const rotation = useMotionValue(0)
+  const activeName = useTransform(rotation, (deg) => nameAtRotation(deg, slices))
+  const [landed, setLanded] = useState(false)
   const finished = useRef(false)
+  const onCompleteRef = useRef(onComplete)
 
   useEffect(() => {
+    onCompleteRef.current = onComplete
+  }, [onComplete])
+
+  useEffect(() => {
+    const sweep = 360 / slices.length
+    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    const turns = reduceMotion ? 1 : 6
+    const jitter = reduceMotion ? 0 : (Math.random() - 0.5) * sweep * 0.36
+    const end = turns * 360 - ((winnerIndex + 0.5) * sweep + jitter)
+    const duration = reduceMotion ? 0.35 : 7
+
     finished.current = false
-    y.set(startY)
-  }, [sequence, stopIndex, startY, y])
+    rotation.set(0)
+    let timeoutId
+    let cancelled = false
+    const controls = animate(rotation, end, {
+      duration,
+      ease: wheelEase,
+      onComplete: () => {
+        if (cancelled || finished.current) return
+        finished.current = true
+        setLanded(true)
+        timeoutId = setTimeout(() => onCompleteRef.current?.(), 1200)
+      },
+    })
+    return () => {
+      cancelled = true
+      controls.stop()
+      clearTimeout(timeoutId)
+    }
+  }, [rotation, slices.length, winnerIndex])
+
+  const showLabels = slices.length <= 16
+  const fontSize = slices.length <= 8 ? 3.6 : slices.length <= 12 ? 3.05 : 2.55
+  const highlight = slicePath(0, slices.length, 44.2)
 
   return (
-    <div className="relative mx-auto w-full max-w-xl">
-      <div
-        className="relative overflow-hidden rounded-[1.75rem] border border-amber-300/25 bg-stone-950/50 shadow-[0_0_60px_rgba(251,191,36,0.12)]"
-        style={{
-          height: VIEWPORT_HEIGHT,
-          WebkitMaskImage:
-            'linear-gradient(to bottom, transparent 0%, black 18%, black 82%, transparent 100%)',
-          maskImage:
-            'linear-gradient(to bottom, transparent 0%, black 18%, black 82%, transparent 100%)',
-        }}
-      >
-        {/* Fixed center selection band */}
-        <div
-          className="pointer-events-none absolute inset-x-3 z-20 rounded-xl border border-amber-300/70 bg-amber-400/10 shadow-[0_0_28px_rgba(251,191,36,0.28)]"
-          style={{
-            top: CENTER_OFFSET,
-            height: ITEM_HEIGHT,
-          }}
-        />
-        <div
-          className="pointer-events-none absolute inset-x-8 z-20 border-t border-amber-200/50"
-          style={{ top: CENTER_OFFSET }}
-        />
-        <div
-          className="pointer-events-none absolute inset-x-8 z-20 border-b border-amber-200/50"
-          style={{ top: CENTER_OFFSET + ITEM_HEIGHT }}
-        />
+    <div className="mx-auto w-[min(92vw,68vh,540px)]">
+      <div className="relative aspect-square w-full">
+        <div className="absolute left-1/2 top-[1.5%] z-30 -translate-x-1/2">
+          <div className="h-0 w-0 border-x-[13px] border-t-[24px] border-x-transparent border-t-amber-300 drop-shadow-[0_6px_8px_rgba(0,0,0,0.5)]" />
+        </div>
 
-        <motion.div
-          className="relative z-10 will-change-transform"
-          style={{ y }}
-          initial={{ y: startY }}
-          animate={{ y: endY }}
-          transition={{
-            duration: SPIN_DURATION,
-            ease: spinEase,
-          }}
-          onAnimationComplete={() => {
-            if (finished.current) return
-            finished.current = true
-            onComplete?.()
-          }}
-        >
-          {sequence.map((name, index) => (
-            <WheelRow key={`${index}-${name}`} index={index} name={name} y={y} />
-          ))}
+        <motion.div className="absolute inset-[5%] will-change-transform" style={{ rotate: rotation }}>
+          <svg viewBox="0 0 100 100" className="h-full w-full drop-shadow-[0_16px_36px_rgba(0,0,0,0.5)]">
+            <circle cx="50" cy="50" r="49" fill="#1c1408" />
+            {Array.from({ length: 28 }).map((_, index) => {
+              const [x, y] = polar((index / 28) * 360, 47.15)
+              return (
+                <circle
+                  key={index}
+                  cx={x}
+                  cy={y}
+                  r="1.05"
+                  fill={index % 2 ? '#fff7ed' : '#fde68a'}
+                  className={index % 2 ? 'wheel-bulb wheel-bulb-delay' : 'wheel-bulb'}
+                />
+              )
+            })}
+            {slices.map((name, index) => (
+              <path
+                key={`${index}-${name}`}
+                d={slicePath(index, slices.length, 44.2)}
+                fill={SLICE_COLORS[index % SLICE_COLORS.length]}
+                stroke="rgba(253,230,138,0.28)"
+                strokeWidth="0.2"
+              />
+            ))}
+            {showLabels
+              ? slices.map((name, index) => {
+                  const mid = (index + 0.5) * (360 / slices.length)
+                  const flip = mid > 90 && mid < 270
+                  return (
+                    <g key={`label-${index}`} transform={`rotate(${mid} 50 50)`}>
+                      <text
+                        x="50"
+                        y="23"
+                        textAnchor="middle"
+                        dominantBaseline="middle"
+                        fill="#fff7ed"
+                        fontSize={fontSize}
+                        fontWeight="700"
+                        stroke="#1c1917"
+                        strokeWidth="0.18"
+                        paintOrder="stroke"
+                        transform={flip ? 'rotate(180 50 23)' : undefined}
+                        style={{ fontFamily: 'Vazirmatn, sans-serif', unicodeBidi: 'plaintext' }}
+                      >
+                        {shortenName(name, slices.length)}
+                      </text>
+                    </g>
+                  )
+                })
+              : null}
+            <circle cx="50" cy="50" r="44.2" fill="none" stroke="#fbbf24" strokeWidth="1.15" />
+            <circle cx="50" cy="50" r="12" fill="#1c1917" stroke="#fbbf24" strokeWidth="0.7" />
+          </svg>
         </motion.div>
+
+        {landed ? (
+          <svg className="pointer-events-none absolute inset-[5%] z-10" viewBox="0 0 100 100">
+            <path d={highlight} fill="rgba(251,191,36,0.28)" />
+          </svg>
+        ) : null}
+
+        <div className="pointer-events-none absolute left-1/2 top-1/2 z-20 flex h-[16%] w-[16%] -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full bg-gradient-to-b from-amber-200 to-amber-500 text-lg font-bold text-stone-950 shadow-[0_0_22px_rgba(251,191,36,0.55)]">
+          ★
+        </div>
       </div>
+
+      <div
+        className={`mx-auto mt-4 max-w-md rounded-2xl border px-4 py-3 text-center ${
+          landed
+            ? 'border-amber-300 bg-amber-400/15 shadow-[0_0_28px_rgba(251,191,36,0.35)]'
+            : 'border-white/10 bg-stone-950/55'
+        }`}
+      >
+        <motion.p dir="auto" className="truncate text-2xl font-bold text-white sm:text-3xl">
+          {activeName}
+        </motion.p>
+      </div>
+      <p className="mt-3 text-center text-xs text-stone-400">
+        {landed ? 'برنده مشخص شد' : 'گردونه در حال چرخش…'}
+      </p>
     </div>
   )
 }
@@ -254,12 +299,6 @@ export default function DrawReveal({
   const [showNext, setShowNext] = useState(false)
   const confettiFired = useRef(false)
   const timers = useRef([])
-
-  const spinPlan = useMemo(
-    () => buildSpinSequence(eligibleNames, winner?.name || 'برنده'),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [winner?.id, winner?.name],
-  )
 
   function clearTimers() {
     timers.current.forEach((id) => clearTimeout(id))
@@ -295,7 +334,7 @@ export default function DrawReveal({
           tick()
         }, 720)
       } else {
-        schedule(() => setStage('slot'), 650)
+        schedule(() => setStage('wheel'), 650)
       }
     }
     tick()
@@ -349,24 +388,23 @@ export default function DrawReveal({
             </motion.div>
           ) : null}
 
-          {stage === 'slot' ? (
+          {stage === 'wheel' ? (
             <motion.div
-              key="slot"
-              className="w-full max-w-3xl"
-              initial={{ opacity: 0, y: 12 }}
-              animate={{ opacity: 1, y: 0 }}
+              key="wheel"
+              className="flex w-full flex-col items-center"
+              initial={{ opacity: 0, scale: 0.94 }}
+              animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0 }}
-              transition={{ duration: 0.2 }}
+              transition={{ duration: 0.25 }}
             >
-              <p className="mb-5 text-center text-sm font-semibold tracking-wide text-amber-300/90">
+              <p className="mb-2 text-center text-sm font-semibold tracking-wide text-amber-300/90">
                 {winner.prizeName}
               </p>
-              <PickerWheel
-                sequence={spinPlan.sequence}
-                stopIndex={spinPlan.stopIndex}
+              <FortuneWheel
+                names={eligibleNames}
+                winnerName={winner.name || 'برنده'}
                 onComplete={enterReveal}
               />
-              <p className="mt-5 text-center text-xs text-stone-400">چرخ در حال چرخش…</p>
             </motion.div>
           ) : null}
 

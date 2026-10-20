@@ -35,3 +35,28 @@ body {
     transform: translateY(0) scale(1);
   }
 }
+
+@keyframes wheel-bulb {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.28;
+  }
+}
+
+.wheel-bulb {
+  animation: wheel-bulb 0.55s ease-in-out infinite;
+}
+
+.wheel-bulb-delay {
+  animation-delay: 0.28s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wheel-bulb,
+  .wheel-bulb-delay {
+    animation: none;
+  }
+}
